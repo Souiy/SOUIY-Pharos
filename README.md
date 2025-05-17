@@ -2,13 +2,13 @@
 
 ---
 
-New Testnet: Pharos
+## New Testnet: Pharos
 
-🏷 Reward : Confirmed 
+#### 🏷 Reward : Confirmed 
 
-➡Claim Faucet : https://testnet.pharosnetwork.xyz/
+#### ➡ Claim Faucet : https://testnet.pharosnetwork.xyz/
 
- 🪂 Register : https://testnet.pharosnetwork.xyz/experience?inviteCode=0n1MI3TqVPeTWEkB
+#### 🪂 Register : https://testnet.pharosnetwork.xyz/experience?inviteCode=0n1MI3TqVPeTWEkB
 
 ➖ Connect Wallet Testnet
 
@@ -61,7 +61,7 @@ npm install
 node index.js
 ```
 
-Program akan memulai proses interaksi otomatis berdasarkan konfigurasi yang diberikan.
+> 📝 Program akan memulai proses interaksi otomatis berdasarkan konfigurasi yang diberikan.
 
 ---
 
