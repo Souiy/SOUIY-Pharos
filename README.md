@@ -3,6 +3,7 @@
 ---
 
 New Testnet: Pharos
+
 🏷 Reward : Confirmed 
 
 ➡Claim Faucet : https://testnet.pharosnetwork.xyz/
@@ -10,11 +11,17 @@ New Testnet: Pharos
  🪂 Register : https://testnet.pharosnetwork.xyz/experience?inviteCode=0n1MI3TqVPeTWEkB
 
 ➖ Connect Wallet Testnet
+
 ➖ Daily Login 》Bind Twitter/Discod on Profil
+
 ➖ Complete All Task
+
 ➖ Swap 10x
+
 ➖ Add LP 10x
+
 ➖ Send to Friend 10x
+
 ➖ Done
 
 ---
@@ -50,10 +57,9 @@ npm install
 ---
 
 ## ▶️ Menjalankan
-
-
+```
 node index.js
-
+```
 
 Program akan memulai proses interaksi otomatis berdasarkan konfigurasi yang diberikan.
 
