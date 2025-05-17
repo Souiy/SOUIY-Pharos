@@ -48,7 +48,7 @@ npm install
 ## 🔧 Konfigurasi
 
 ```
-### nano pk.txt
+nano pk.txt
 ```
 
 0xYourPrivateKey1
