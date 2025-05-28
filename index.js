@@ -11,6 +11,7 @@ const RPC_URL = "https://testnet.dplabs-internal.com";
 const WPHRS_ADDRESS = "0x76aaada469d23216be5f7c596fa25f282ff9b364";
 const USDT_ADDRESS = "0xed59de2d7ad9c043442e381231ee3646fc3c2939";
 const ROUTER_ADDRESS = "0x1a4de519154ae51200b0ad7c90f7fac75547888a";
+const LP_ADDRESS = "0xF8a1D4FF0f9b9Af7CE58E1fc1833688F3BFd6115";
 const API_BASE_URL = "https://api.pharosnetwork.xyz";
 const FAUCET_USDT_URL = "https://testnet-router.zenithswap.xyz/api/v1/faucet";
 const CONFIG_FILE = "config.json";
@@ -45,8 +46,9 @@ let isHeaderRendered = false;
 let activeProcesses = 0;
 
 let dailyActivityConfig = {
-  swapRepetitions: 10, 
-  sendPhrsRepetitions: 10 
+  swapRepetitions: 10,
+  sendPhrsRepetitions: 10,
+  addLiquidityRepetitions: 10 
 };
 
 const ERC20_ABI = [
@@ -59,6 +61,40 @@ const ROUTER_ABI = [
   "function multicall(uint256 collectionAndSelfcalls, bytes[] data) public"
 ];
 
+const LP_ABI = [
+  {
+    inputs: [
+      {
+        components: [
+          { internalType: "address", name: "token0", type: "address" },
+          { internalType: "address", name: "token1", type: "address" },
+          { internalType: "uint24", name: "fee", type: "uint24" },
+          { internalType: "int24", name: "tickLower", type: "int24" },
+          { internalType: "int24", name: "tickUpper", type: "int24" },
+          { internalType: "uint256", name: "amount0Desired", type: "uint256" },
+          { internalType: "uint256", name: "amount1Desired", type: "uint256" },
+          { internalType: "uint256", name: "amount0Min", type: "uint256" },
+          { internalType: "uint256", name: "amount1Min", type: "uint256" },
+          { internalType: "address", name: "recipient", type: "address" },
+          { internalType: "uint256", name: "deadline", type: "uint256" },
+        ],
+        internalType: "struct INonfungiblePositionManager.MintParams",
+        name: "params",
+        type: "tuple",
+      },
+    ],
+    name: "mint",
+    outputs: [
+      { internalType: "uint256", name: "tokenId", type: "uint256" },
+      { internalType: "uint128", name: "liquidity", type: "uint128" },
+      { internalType: "uint256", name: "amount0", type: "uint256" },
+      { internalType: "uint256", name: "amount1", type: "uint256" },
+    ],
+    stateMutability: "payable",
+    type: "function",
+  },
+];
+
 function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -66,7 +102,8 @@ function loadConfig() {
       const config = JSON.parse(data);
       dailyActivityConfig.swapRepetitions = Number(config.swapRepetitions) || 10;
       dailyActivityConfig.sendPhrsRepetitions = Number(config.sendPhrsRepetitions) || 10;
-      addLog(`Loaded config: Auto Swap  = ${dailyActivityConfig.swapRepetitions}, Auto Send PHRS = ${dailyActivityConfig.sendPhrsRepetitions}`, "success");
+      dailyActivityConfig.addLiquidityRepetitions = Number(config.addLiquidityRepetitions) || 10;
+      addLog(`Loaded config: Auto Swap = ${dailyActivityConfig.swapRepetitions}, Auto Send PHRS = ${dailyActivityConfig.sendPhrsRepetitions}, Auto Add LP = ${dailyActivityConfig.addLiquidityRepetitions}`, "success");
     } else {
       addLog("No config file found, using default settings.", "info");
     }
@@ -127,7 +164,7 @@ function getShortHash(hash) {
 
 function clearTransactionLogs() {
   transactionLogs = [];
-  addLog("Transaction logs cleared. Satukan Solidaritas Bantu Palestina https://digital.dompetdhuafa.org/donasi/jagapalestina?gad_source=1&gad_campaignid=19753975814&gbraid=0AAAAADAhM1vRaR8mSktNHoNTW0ZytKlxb&gclid=Cj0KCQjwucDBBhDxARIsANqFdr2JxZgjGKTdpImD7icmr6UG3c6XnjjAKe83JIZeCR3MtFc64nHIscwaAg0UEALw_wcB Innalillahi! Lebih dari 50.983 syahid terbunuh, 70% korban anak-anak dan perempuan. Kuatkan solidaritas sekarang!", "success");
+  addLog("Satukan Solidaritas Bantu Palestina! Transaction logs cleared. ", "success");
   updateLogs();
 }
 
@@ -170,7 +207,7 @@ async function sleep(ms) {
       }, 100);
     });
   } finally {
-    activeProcesses = Math.max(0, activeProcesses - 1); 
+    activeProcesses = Math.max(0, activeProcesses - 1);
   }
 }
 
@@ -336,9 +373,9 @@ async function getNextNonce(provider, walletAddress) {
   }
 }
 
-async function checkAndApproveToken(wallet, provider, tokenAddress, amount, tokenName, accountIndex, swapCount) {
+async function checkAndApproveToken(wallet, provider, tokenAddress, amount, tokenName, accountIndex, count, type = "swap") {
   if (shouldStop) {
-    addLog("Approval stopped due to stop request.", "info");
+    addLog(`${type} approval stopped due to stop request.`, "info");
     return false;
   }
   try {
@@ -346,26 +383,27 @@ async function checkAndApproveToken(wallet, provider, tokenAddress, amount, toke
     const token = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
     const balance = await token.balanceOf(signer.address);
     if (balance < amount) {
-      addLog(`Account ${accountIndex + 1} - Swap ${swapCount}: Insufficient ${tokenName} balance (${ethers.formatEther(balance)})`, "error");
+      addLog(`Account ${accountIndex + 1} - ${type} ${count}: Insufficient ${tokenName} balance (${ethers.formatEther(balance)})`, "error");
       return false;
     }
-    const allowance = await token.allowance(signer.address, ROUTER_ADDRESS);
+    const targetAddress = type === "swap" ? ROUTER_ADDRESS : LP_ADDRESS;
+    const allowance = await token.allowance(signer.address, targetAddress);
     if (allowance < amount) {
-      addLog(`Account ${accountIndex + 1} - Swap ${swapCount}: Approving ${tokenName}...`, "info");
+      addLog(`Account ${accountIndex + 1} - ${type} ${count}: Approving ${tokenName}...`, "info");
       const nonce = await getNextNonce(provider, signer.address);
       const feeData = await provider.getFeeData();
-      const tx = await token.approve(ROUTER_ADDRESS, ethers.MaxUint256, {
+      const tx = await token.approve(targetAddress, ethers.MaxUint256, {
         gasLimit: 300000,
         maxFeePerGas: feeData.maxFeePerGas || ethers.parseUnits("1", "gwei"),
         maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || ethers.parseUnits("0.5", "gwei"),
         nonce
       });
-      addLog(`Account ${accountIndex + 1} - Swap ${swapCount}: Approval sent. Hash: ${getShortHash(tx.hash)}`, "success");
+      addLog(`Account ${accountIndex + 1} - ${type} ${count}: Approval sent. Hash: ${getShortHash(tx.hash)}`, "success");
       await tx.wait();
     }
     return true;
   } catch (error) {
-    addLog(`Account ${accountIndex + 1} - Swap ${swapCount}: Error approving ${tokenName}: ${error.message}`, "error");
+    addLog(`Account ${accountIndex + 1} - ${type} ${count}: Error approving ${tokenName}: ${error.message}`, "error");
     return false;
   }
 }
@@ -484,6 +522,62 @@ async function loginAccount(wallet, proxyUrl, useProxy = true) {
   }
 }
 
+async function reportTransaction(walletAddress, txHash) {
+  const url = `https://api.pharosnetwork.xyz/task/verify?address=${walletAddress}&task_id=103&tx_hash=${txHash}`;
+  const maxRetries = 5;
+  let lastError = null;
+
+  addLog(`Reporting Transaction for ${getShortAddress(walletAddress)}`, "info");
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const headers = {
+        "accept": "application/json, text/plain, */*",
+        "accept-language": "en-US,en;q=0.8",
+        "authorization": `Bearer ${accountJwts[walletAddress]}`,
+        "priority": "u=1, i",
+        "sec-ch-ua": '"Chromium";v="136", "Brave";v="136", "Not.A/Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
+        "sec-gpc": "1",
+        "Referer": "https://testnet.pharosnetwork.xyz/",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+      };
+      addLog(`Attempt ${attempt}/${maxRetries}: Sending report`, "info");
+      const response = await makeApiRequest(
+        "post",
+        url,
+        null,
+        null,
+        headers,
+        1,
+        2000,
+        false
+      );
+      addLog(`Response: ${JSON.stringify(response)}`, "info");
+      if (response.code === 0 && response.data?.verified) {
+        addLog(`Transaction reported successfully`, "success");
+        return;
+      } else {
+        lastError = response.msg || 'Unknown error';
+        addLog(`Attempt ${attempt}/${maxRetries} failed: ${lastError}`, "error");
+      }
+    } catch (error) {
+      lastError = error.response?.data || error.message;
+      addLog(`Attempt ${attempt}/${maxRetries} error: ${JSON.stringify(lastError)}`, "error");
+    }
+    if (attempt < maxRetries) {
+      addLog(`Waiting 10 seconds before retrying...`, "wait");
+      await sleep(10000);
+    }
+  }
+  addLog(`Failed to report transaction after ${maxRetries} attempts: ${lastError}`, "error");
+}
+
 async function claimFaucetPHRs() {
   if (privateKeys.length === 0) {
     addLog("No valid private keys found.", "error");
@@ -557,7 +651,7 @@ async function claimFaucetPHRs() {
   } catch (error) {
     addLog(`Auto Claim PHRs failed: ${error.message}`, "error");
   } finally {
-    await updateWallets(); 
+    await updateWallets();
   }
 }
 
@@ -609,7 +703,7 @@ async function claimFaucetUSDT() {
   } catch (error) {
     addLog(`Auto Claim USDT failed: ${error.message}`, "error");
   } finally {
-    await updateWallets(); 
+    await updateWallets();
   }
 }
 
@@ -620,6 +714,12 @@ async function executeSwap(wallet, provider, swapCount, fromToken, toToken, amou
   }
   try {
     const signer = new ethers.Wallet(wallet.privateKey, provider);
+    const balance = await new ethers.Contract(fromToken, ERC20_ABI, provider).balanceOf(signer.address);
+    const amountBigNumber = ethers.parseEther(amount);
+    if (balance < amountBigNumber) {
+      addLog(`Account ${accountIndex + 1} - Swap ${swapCount}: Insufficient ${fromToken === WPHRS_ADDRESS ? "wPHRS" : "USDT"} balance`, "error");
+      return false;
+    }
     const contract = new ethers.Contract(ROUTER_ADDRESS, ROUTER_ABI, signer);
     const pair = { from: fromToken === WPHRS_ADDRESS ? "WPHRS" : "USDT", to: toToken === WPHRS_ADDRESS ? "WPHRS" : "USDT" };
     const multicallData = await getMulticallData(pair, amount, signer.address);
@@ -630,12 +730,11 @@ async function executeSwap(wallet, provider, swapCount, fromToken, toToken, amou
     addLog(`Account ${accountIndex + 1} - Swap ${swapCount}: Executing Swap ${direction}...`, "info");
     const nonce = await getNextNonce(provider, signer.address);
     const feeData = await provider.getFeeData();
-    const gasLimit = 300000;
     const tx = await contract.multicall(
       ethers.toBigInt(Math.floor(Date.now() / 1000)),
       multicallData,
       {
-        gasLimit,
+        gasLimit: 300000,
         maxFeePerGas: feeData.maxFeePerGas || ethers.parseUnits("5", "gwei"),
         maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || ethers.parseUnits("1", "gwei"),
         nonce
@@ -651,18 +750,73 @@ async function executeSwap(wallet, provider, swapCount, fromToken, toToken, amou
   }
 }
 
+async function performLiquidityAddition(wallet, provider, lpCount, accountIndex, proxyUrl) {
+  if (shouldStop) {
+    addLog("Liquidity addition stopped due to stop request.", "info");
+    return false;
+  }
+  try {
+    const signer = new ethers.Wallet(wallet.privateKey, provider);
+    const positionManager = new ethers.Contract(LP_ADDRESS, LP_ABI, signer);
+
+    const amountWPHRS = (Math.random() * (0.004 - 0.001) + 0.001).toFixed(6);
+    const amountWPHRSWei = ethers.parseUnits(amountWPHRS, 18);
+
+    const amountUSDT = (parseFloat(amountWPHRS) * 1).toFixed(6);
+    const amountUSDTWei = ethers.parseUnits(amountUSDT, 18);
+
+    const token0 = WPHRS_ADDRESS < USDT_ADDRESS ? WPHRS_ADDRESS : USDT_ADDRESS;
+    const token1 = WPHRS_ADDRESS < USDT_ADDRESS ? USDT_ADDRESS : WPHRS_ADDRESS;
+
+    const isWPHRSApproved = await checkAndApproveToken(wallet, provider, WPHRS_ADDRESS, amountWPHRSWei, "wPHRS", accountIndex, lpCount, "LP");
+    if (!isWPHRSApproved) return false;
+    const isUSDTApproved = await checkAndApproveToken(wallet, provider, USDT_ADDRESS, amountUSDTWei, "USDT", accountIndex, lpCount, "LP");
+    if (!isUSDTApproved) return false;
+
+    const mintParams = {
+      token0,
+      token1,
+      fee: 3000, 
+      tickLower: -60000, 
+      tickUpper: 60000,  
+      amount0Desired: token0 === WPHRS_ADDRESS ? amountWPHRSWei : amountUSDTWei,
+      amount1Desired: token0 === WPHRS_ADDRESS ? amountUSDTWei : amountWPHRSWei,
+      amount0Min: 0,
+      amount1Min: 0,
+      recipient: wallet.address,
+      deadline: Math.floor(Date.now() / 1000) + 600 
+    };
+
+    const estimatedGas = await positionManager.mint.estimateGas(mintParams);
+    const feeData = await provider.getFeeData();
+    const tx = await positionManager.mint(mintParams, {
+      gasLimit: Math.ceil(Number(estimatedGas) * 1.2),
+      maxFeePerGas: feeData.maxFeePerGas || ethers.parseUnits("1", "gwei"),
+      maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || ethers.parseUnits("0.5", "gwei"),
+      nonce: await getNextNonce(provider, wallet.address)
+    });
+
+    addLog(`Account ${accountIndex + 1} - LP ${lpCount}: Adding liquidity WPHRS/USDT... Hash: ${getShortHash(tx.hash)}`, "success");
+    await tx.wait();
+    addLog(`Account ${accountIndex + 1} - LP ${lpCount}: Liquidity added successfully`, "success");
+    return true;
+  } catch (error) {
+    addLog(`Account ${accountIndex + 1} - LP ${lpCount}: Failed to add liquidity: ${error.message}`, "error");
+    return false;
+  }
+}
+
 async function runDailyActivity() {
   if (privateKeys.length === 0) {
     addLog("No valid private keys found.", "error");
     return;
   }
-  addLog(`Starting daily activity for all accounts. Auto Swap: ${dailyActivityConfig.swapRepetitions}, Auto Send PHRS: ${dailyActivityConfig.sendPhrsRepetitions}`, "info");
+  addLog(`Starting daily activity for all accounts. Auto Swap: ${dailyActivityConfig.swapRepetitions}, Auto Send PHRS: ${dailyActivityConfig.sendPhrsRepetitions}, Auto Add LP: ${dailyActivityConfig.addLiquidityRepetitions}`, "info");
   activityRunning = true;
   isCycleRunning = true;
   shouldStop = false;
   hasLoggedSleepInterrupt = false;
-  activeProcesses = Math.max(0, activeProcesses); 
-  addLog(`Initial activeProcesses: ${activeProcesses}`, "debug");
+  activeProcesses = Math.max(0, activeProcesses);
   updateMenu();
   try {
     for (let accountIndex = 0; accountIndex < privateKeys.length && !shouldStop; accountIndex++) {
@@ -681,160 +835,172 @@ async function runDailyActivity() {
       }
       const wallet = new ethers.Wallet(privateKeys[accountIndex], provider);
       addLog(`Processing account ${accountIndex + 1}: ${getShortAddress(wallet.address)}`, "info");
-
-      if (!shouldStop) {
-        try {
-          let successfulSwaps = 0;
-          let attempts = 0;
-          while (successfulSwaps < dailyActivityConfig.swapRepetitions && !shouldStop) {
-            attempts++;
-            const isWPHRSToUSDT = attempts % 2 === 1;
-            const fromToken = isWPHRSToUSDT ? WPHRS_ADDRESS : USDT_ADDRESS;
-            const toToken = isWPHRSToUSDT ? USDT_ADDRESS : WPHRS_ADDRESS;
-            const amount = isWPHRSToUSDT ? "0.001" : "0.1";
-            const amountBigNumber = ethers.parseEther(amount);
-            const direction = isWPHRSToUSDT ? "wPHRS ➯ USDT" : "USDT ➯ wPHRS";
-            const isApproved = await checkAndApproveToken(wallet, provider, fromToken, amountBigNumber, isWPHRSToUSDT ? "wPHRS" : "USDT", accountIndex, attempts);
-            if (!isApproved) {
-              addLog(`Account ${accountIndex + 1} - Swap attempt ${attempts}: Skipped due to insufficient balance, trying next swap...`, "error");
-              await sleep(5000);
-              continue;
-            }
-            const swapSuccess = await executeSwap(wallet, provider, attempts, fromToken, toToken, amount, direction, accountIndex, proxyUrl);
-            if (swapSuccess) {
-              successfulSwaps++;
-              await updateWallets();
-              if (successfulSwaps < dailyActivityConfig.swapRepetitions && !shouldStop) {
-                const randomDelay = Math.floor(Math.random() * (30000 - 15000 + 1)) + 15000;
-                addLog(`Account ${accountIndex + 1} - Waiting ${Math.floor(randomDelay / 1000)} seconds before next swap...`, "wait");
-                await sleep(randomDelay);
-              }
-            } else {
-              addLog(`Account ${accountIndex + 1} - Swap attempt ${attempts}: Failed, retrying after 30 seconds...`, "error");
-              await sleep(30000);
-            }
-          }
-          if (successfulSwaps < dailyActivityConfig.swapRepetitions && !shouldStop) {
-            addLog(`Account ${accountIndex + 1}: Only ${successfulSwaps} successful swaps completed.`, "error");
-          } else if (successfulSwaps >= dailyActivityConfig.swapRepetitions) {
-            addLog(`Account ${accountIndex + 1}: Completed ${successfulSwaps} successful swaps.`, "success");
-          }
-        } catch (error) {
-          addLog(`Account ${accountIndex + 1}: Swap process failed: ${error.message}`, "error");
-        }
+      const loginSuccess = await loginAccount(wallet, proxyUrl);
+      if (!loginSuccess) {
+        addLog(`Account ${accountIndex + 1}: Skipping daily activity due to login failure.`, "error");
+        continue;
       }
 
       if (!shouldStop) {
-        try {
-          const addresses = loadWalletAddresses();
-          let successfulTransfers = 0;
-          if (addresses.length > 0) {
-            for (let i = 0; i < dailyActivityConfig.sendPhrsRepetitions && !shouldStop; i++) {
-              let recipient;
-              do {
-                recipient = addresses[Math.floor(Math.random() * addresses.length)];
-              } while (recipient.toLowerCase() === wallet.address.toLowerCase());
-              const amount = ethers.parseEther((Math.random() * (0.0002 - 0.0001) + 0.0001).toFixed(6));
-              try {
-                addLog(`Account ${accountIndex + 1}: Sending ${ethers.formatEther(amount)} PHRS to ${getShortAddress(recipient)}...`, "info");
-                const feeData = await provider.getFeeData();
-                const tx = await wallet.sendTransaction({
-                  to: recipient,
-                  value: amount,
-                  gasLimit: 21000,
-                  maxFeePerGas: feeData.maxFeePerGas || ethers.parseUnits("1", "gwei"),
-                  maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || ethers.parseUnits("0.5", "gwei"),
-                  nonce: await getNextNonce(provider, wallet.address)
-                });
-                addLog(`Account ${accountIndex + 1}: Sent ${ethers.formatEther(amount)} PHRS to ${getShortAddress(recipient)}. Hash: ${getShortHash(tx.hash)}`, "success");
-                await tx.wait();
-                successfulTransfers++;
-              } catch (error) {
-                addLog(`Account ${accountIndex + 1}: Failed to send PHRS to ${getShortAddress(recipient)}: ${error.message}`, "error");
-              }
-              if (i < dailyActivityConfig.sendPhrsRepetitions - 1 && !shouldStop) await sleep(5000);
+        let successfulSwaps = 0;
+        for (let attempt = 1; attempt <= dailyActivityConfig.swapRepetitions && !shouldStop; attempt++) {
+          const isWPHRSToUSDT = attempt % 2 === 1;
+          const fromToken = isWPHRSToUSDT ? WPHRS_ADDRESS : USDT_ADDRESS;
+          const toToken = isWPHRSToUSDT ? USDT_ADDRESS : WPHRS_ADDRESS;
+          const amount = isWPHRSToUSDT ? "0.001" : "0.1";
+          const direction = isWPHRSToUSDT ? "wPHRS ➯ USDT" : "USDT ➯ wPHRS";
+          const isApproved = await checkAndApproveToken(wallet, provider, fromToken, ethers.parseEther(amount), isWPHRSToUSDT ? "wPHRS" : "USDT", accountIndex, attempt);
+          if (!isApproved) {
+            addLog(`Account ${accountIndex + 1} - Swap attempt ${attempt}: Skipped due to insufficient balance`, "error");
+            continue;
+          }
+          const swapSuccess = await executeSwap(wallet, provider, attempt, fromToken, toToken, amount, direction, accountIndex, proxyUrl);
+          if (swapSuccess) {
+            successfulSwaps++;
+            await updateWallets();
+            if (successfulSwaps < dailyActivityConfig.swapRepetitions && !shouldStop) {
+              const randomDelay = Math.floor(Math.random() * (30000 - 15000 + 1)) + 15000;
+              addLog(`Account ${accountIndex + 1} - Waiting ${Math.floor(randomDelay / 1000)} seconds before next swap...`, "wait");
+              await sleep(randomDelay);
             }
-            addLog(`Account ${accountIndex + 1}: Completed ${successfulTransfers} successful PHRS transfers.`, "success");
           } else {
-            addLog(`Account ${accountIndex + 1}: Skipping PHRS transfers due to missing wallet addresses.`, "warn");
+            addLog(`Account ${accountIndex + 1} - Swap attempt ${attempt}: Failed, skipping to next swap`, "error");
           }
-        } catch (error) {
-          addLog(`Account ${accountIndex + 1}: PHRS transfer process failed: ${error.message}`, "error");
+        }
+        if (successfulSwaps >= dailyActivityConfig.swapRepetitions) {
+          addLog(`Account ${accountIndex + 1}: Completed ${successfulSwaps} successful swaps.`, "success");
         }
       }
 
       if (!shouldStop) {
-        try {
-          if (!accountJwts[wallet.address]) {
-            await loginAccount(wallet, proxyUrl);
-          }
-          if (accountJwts[wallet.address] && !shouldStop) {
-            const checkinUrl = `${API_BASE_URL}/sign/in?address=${wallet.address}`;
-            const checkinResponse = await makeApiRequest("post", checkinUrl, {}, proxyUrl, {
-              "Authorization": `Bearer ${accountJwts[wallet.address]}`
-            }, 3, 2000, true);
-            if (checkinResponse.code === 0) {
-              addLog(`Account ${accountIndex + 1}: Daily check-in successful.`, "success");
-            } else {
-              addLog(`Account ${accountIndex + 1}: Check-in failed: ${checkinResponse.msg}`, "error");
+        let successfulLPs = 0;
+        for (let attempt = 1; attempt <= dailyActivityConfig.addLiquidityRepetitions && !shouldStop; attempt++) {
+          const lpSuccess = await performLiquidityAddition(wallet, provider, attempt, accountIndex, proxyUrl);
+          if (lpSuccess) {
+            successfulLPs++;
+            await updateWallets();
+            if (successfulLPs < dailyActivityConfig.addLiquidityRepetitions && !shouldStop) {
+              const randomDelay = Math.floor(Math.random() * (30000 - 15000 + 1)) + 15000;
+              addLog(`Account ${accountIndex + 1} - Waiting ${Math.floor(randomDelay / 1000)} seconds before next LP...`, "wait");
+              await sleep(randomDelay);
             }
+          } else {
+            addLog(`Account ${accountIndex + 1} - LP attempt ${attempt}: Failed, skipping to next LP`, "error");
+          }
+        }
+        if (successfulLPs >= dailyActivityConfig.addLiquidityRepetitions) {
+          addLog(`Account ${accountIndex + 1}: Completed ${successfulLPs} successful LP additions.`, "success");
+        }
+      }
+
+      if (!shouldStop) {
+        const addresses = loadWalletAddresses();
+        let successfulTransfers = 0;
+        if (addresses.length > 0) {
+          for (let i = 0; i < dailyActivityConfig.sendPhrsRepetitions && !shouldStop; i++) {
+            let recipient;
+            do {
+              recipient = addresses[Math.floor(Math.random() * addresses.length)];
+            } while (recipient.toLowerCase() === wallet.address.toLowerCase());
+            const amount = ethers.parseEther((Math.random() * (0.0002 - 0.0001) + 0.0001).toFixed(6));
+            try {
+              const balance = await provider.getBalance(wallet.address);
+              if (balance < amount) {
+                addLog(`Account ${accountIndex + 1}: Insufficient PHRS balance for transfer (${ethers.formatEther(balance)} PHRS)`, "error");
+                continue;
+              }
+              addLog(`Account ${accountIndex + 1}: Sending ${ethers.formatEther(amount)} PHRS to ${getShortAddress(recipient)}...`, "info");
+              const feeData = await provider.getFeeData();
+              const tx = await wallet.sendTransaction({
+                to: recipient,
+                value: amount,
+                gasLimit: 21000,
+                maxFeePerGas: feeData.maxFeePerGas || ethers.parseUnits("1", "gwei"),
+                maxPriorityFeePerGas: feeData.maxPriorityFeePerGas || ethers.parseUnits("0.5", "gwei"),
+                nonce: await getNextNonce(provider, wallet.address)
+              });
+              addLog(`Account ${accountIndex + 1}: Sent ${ethers.formatEther(amount)} PHRS to ${getShortAddress(recipient)}. Hash: ${getShortHash(tx.hash)}`, "success");
+              await tx.wait();
+              successfulTransfers++;
+              await reportTransaction(wallet.address, tx.hash);
+            } catch (error) {
+              addLog(`Account ${accountIndex + 1}: Failed to send PHRS to ${getShortAddress(recipient)}: ${error.message}`, "error");
+            }
+            if (i < dailyActivityConfig.sendPhrsRepetitions - 1 && !shouldStop) await sleep(5000);
+          }
+          addLog(`Account ${accountIndex + 1}: Completed ${successfulTransfers} successful PHRS transfers.`, "success");
+        }
+      }
+
+      if (!shouldStop && accountJwts[wallet.address]) {
+        try {
+          const checkinUrl = `${API_BASE_URL}/sign/in?address=${wallet.address}`;
+          const checkinResponse = await makeApiRequest(
+            "post",
+            checkinUrl,
+            {},
+            proxyUrl,
+            { "Authorization": `Bearer ${accountJwts[wallet.address]}` },
+            3,
+            2000,
+            true
+          );
+          if (checkinResponse.code === 0) {
+            addLog(`Account ${accountIndex + 1}: Daily check-in successful.`, "success");
+          } else {
+            addLog(`Account ${accountIndex + 1}: Check-in failed: ${checkinResponse.msg}`, "error");
           }
         } catch (error) {
           addLog(`Account ${accountIndex + 1}: Check-in error: ${error.message}`, "error");
         }
       }
 
-      if (!shouldStop) {
+      if (!shouldStop && accountJwts[wallet.address]) {
         try {
-          if (!accountJwts[wallet.address]) {
-            await loginAccount(wallet, proxyUrl);
-          }
-          if (accountJwts[wallet.address] && !shouldStop) {
-            const profileUrl = `${API_BASE_URL}/user/profile?address=${wallet.address}`;
-            const profileResponse = await makeApiRequest("get", profileUrl, null, proxyUrl, {
-              "Authorization": `Bearer ${accountJwts[wallet.address]}`
-            }, 3, 2000, true);
-            if (profileResponse.code === 0) {
-              const userInfo = profileResponse.data.user_info;
-              addLog(`Account ${accountIndex + 1}: Address: ${userInfo.Address}, Total Points: ${userInfo.TotalPoints}`, "info");
-            } else {
-              addLog(`Account ${accountIndex + 1}: Failed to get profile: ${profileResponse.msg}`, "error");
-            }
+          const profileUrl = `${API_BASE_URL}/user/profile?address=${wallet.address}`;
+          const profileResponse = await makeApiRequest(
+            "get",
+            profileUrl,
+            null,
+            proxyUrl,
+            { "Authorization": `Bearer ${accountJwts[wallet.address]}` },
+            3,
+            2000,
+            true
+          );
+          if (profileResponse.code === 0) {
+            const userInfo = profileResponse.data.user_info;
+            addLog(`Account ${accountIndex + 1}: Address: ${userInfo.Address}, Total Points: ${userInfo.TotalPoints}`, "info");
           } else {
-            addLog(`Account ${accountIndex + 1}: Skipping profile fetch due to login failure.`, "error");
+            addLog(`Account ${accountIndex + 1}: Failed to get profile: ${profileResponse.msg}`, "error");
           }
         } catch (error) {
           addLog(`Account ${accountIndex + 1}: Profile fetch error: ${error.message}`, "error");
         }
       }
 
-      addLog(`Finished processing for account ${accountIndex + 1}`, "info");
-      nonceTracker = {};
-      accountJwts = {};
       if (accountIndex < privateKeys.length - 1 && !shouldStop) {
         addLog(`Waiting 60 seconds before next account...`, "wait");
         await sleep(60000);
       }
     }
-    if (!shouldStop && activeProcesses <= 0) { 
+    if (!shouldStop && activeProcesses <= 0) {
       addLog("All accounts processed. Waiting 24 hours for next cycle.", "success");
-      activeProcesses = 0; 
       dailyActivityInterval = setTimeout(runDailyActivity, 24 * 60 * 60 * 1000);
-      addLog(`Scheduled next cycle in 24 hours. activeProcesses: ${activeProcesses}`, "debug");
     }
   } catch (error) {
     addLog(`Daily activity failed: ${error.message}`, "error");
   } finally {
     if (shouldStop) {
       const stopCheckInterval = setInterval(() => {
-        if (activeProcesses <= 0) { 
+        if (activeProcesses <= 0) {
           clearInterval(stopCheckInterval);
           activityRunning = false;
           isCycleRunning = false;
           shouldStop = false;
           hasLoggedSleepInterrupt = false;
-          activeProcesses = 0; 
-          addLog(`Daily activity stopped successfully. activeProcesses reset to ${activeProcesses}`, "success");
+          activeProcesses = 0;
+          addLog(`Daily activity stopped successfully.`, "success");
           updateMenu();
           updateStatus();
           safeRender();
@@ -845,19 +1011,17 @@ async function runDailyActivity() {
     } else {
       activityRunning = false;
       isCycleRunning = activeProcesses > 0 || dailyActivityInterval !== null;
-      activeProcesses = Math.max(0, activeProcesses); 
       updateMenu();
       updateStatus();
       safeRender();
     }
     nonceTracker = {};
-    accountJwts = {};
   }
 }
 
 const screen = blessed.screen({
   smartCSR: true,
-  title: "PHAROS AUTO BOT BY SOUIY",
+  title: "PHAROS AUTO BOT",
   autoPadding: true,
   fullUnicode: true,
   mouse: true,
@@ -952,12 +1116,12 @@ const faucetSubMenu = blessed.list({
   vi: true,
   mouse: true,
   border: { type: "line" },
-  style: { 
-    fg: "white", 
-    bg: "default", 
-    border: { fg: "green" }, 
-    selected: { bg: "green", fg: "black" }, 
-    item: { fg: "white" } 
+  style: {
+    fg: "white",
+    bg: "default",
+    border: { fg: "green" },
+    selected: { bg: "green", fg: "black" },
+    item: { fg: "white" }
   },
   items: ["Auto Claim PHRS", "Auto Claim USDT", "Clear Logs", "Refresh", "Back to Main Menu"],
   padding: { left: 1, top: 1 },
@@ -974,12 +1138,12 @@ const swapSubMenu = blessed.list({
   vi: true,
   mouse: true,
   border: { type: "line" },
-  style: { 
-    fg: "white", 
-    bg: "default", 
-    border: { fg: "yellow" }, 
-    selected: { bg: "yellow", fg: "black" }, 
-    item: { fg: "white" } 
+  style: {
+    fg: "white",
+    bg: "default",
+    border: { fg: "yellow" },
+    selected: { bg: "yellow", fg: "black" },
+    item: { fg: "white" }
   },
   items: ["Swap All Wallets", "Select Wallet", "Back to Main Menu"],
   padding: { left: 1, top: 1 },
@@ -996,14 +1160,14 @@ const dailyActivitySubMenu = blessed.list({
   vi: true,
   mouse: true,
   border: { type: "line" },
-  style: { 
-    fg: "white", 
-    bg: "default", 
-    border: { fg: "blue" }, 
-    selected: { bg: "blue", fg: "black" }, 
-    item: { fg: "white" } 
+  style: {
+    fg: "white",
+    bg: "default",
+    border: { fg: "blue" },
+    selected: { bg: "blue", fg: "black" },
+    item: { fg: "white" }
   },
-  items: ["Set Swap Config", "Set Send PHRS Config", "Back to Main Menu"],
+  items: ["Set Swap Config", "Set Send PHRS Config", "Set LP Config", "Back to Main Menu"],
   padding: { left: 1, top: 1 },
   hidden: true
 });
@@ -1018,12 +1182,12 @@ const walletListMenu = blessed.list({
   vi: true,
   mouse: true,
   border: { type: "line" },
-  style: { 
-    fg: "white", 
-    bg: "default", 
-    border: { fg: "cyan" }, 
-    selected: { bg: "cyan", fg: "black" }, 
-    item: { fg: "white" } 
+  style: {
+    fg: "white",
+    bg: "default",
+    border: { fg: "cyan" },
+    selected: { bg: "cyan", fg: "black" },
+    item: { fg: "white" }
   },
   padding: { left: 1, top: 1 },
   hidden: true
@@ -1038,10 +1202,10 @@ const amountForm = blessed.form({
   keys: true,
   mouse: true,
   border: { type: "line" },
-  style: { 
-    fg: "white", 
-    bg: "default", 
-    border: { fg: "blue" } 
+  style: {
+    fg: "white",
+    bg: "default",
+    border: { fg: "blue" }
   },
   padding: { left: 1, top: 1 },
   hidden: true
@@ -1055,9 +1219,9 @@ const amountInput = blessed.textbox({
   height: 3,
   inputOnFocus: true,
   border: { type: "line" },
-  style: { 
-    fg: "white", 
-    bg: "default", 
+  style: {
+    fg: "white",
+    bg: "default",
     border: { fg: "white" },
     focus: { border: { fg: "green" } }
   }
@@ -1072,9 +1236,9 @@ const submitButton = blessed.button({
   content: "Submit",
   align: "center",
   border: { type: "line" },
-  style: { 
-    fg: "white", 
-    bg: "blue", 
+  style: {
+    fg: "white",
+    bg: "blue",
     border: { fg: "white" },
     hover: { bg: "green" },
     focus: { bg: "green" }
@@ -1090,10 +1254,10 @@ const repetitionsForm = blessed.form({
   keys: true,
   mouse: true,
   border: { type: "line" },
-  style: { 
-    fg: "white", 
-    bg: "default", 
-    border: { fg: "blue" } 
+  style: {
+    fg: "white",
+    bg: "default",
+    border: { fg: "blue" }
   },
   padding: { left: 1, top: 1 },
   hidden: true
@@ -1107,9 +1271,9 @@ const repetitionsInput = blessed.textbox({
   height: 3,
   inputOnFocus: true,
   border: { type: "line" },
-  style: { 
-    fg: "white", 
-    bg: "default", 
+  style: {
+    fg: "white",
+    bg: "default",
     border: { fg: "white" },
     focus: { border: { fg: "green" } }
   }
@@ -1124,9 +1288,9 @@ const repetitionsSubmitButton = blessed.button({
   content: "Submit",
   align: "center",
   border: { type: "line" },
-  style: { 
-    fg: "white", 
-    bg: "blue", 
+  style: {
+    fg: "white",
+    bg: "blue",
     border: { fg: "white" },
     hover: { bg: "green" },
     focus: { bg: "green" }
@@ -1172,24 +1336,24 @@ function safeRender() {
 function adjustLayout() {
   const screenHeight = screen.height || 24;
   const screenWidth = screen.width || 80;
-  
+
   headerBox.height = Math.max(6, Math.floor(screenHeight * 0.15));
   statusBox.top = headerBox.height;
   statusBox.height = Math.max(3, Math.floor(screenHeight * 0.07));
-  
+
   walletBox.top = headerBox.height + statusBox.height;
   walletBox.width = Math.floor(screenWidth * 0.4);
   walletBox.height = Math.floor(screenHeight * 0.35);
-  
+
   logBox.top = headerBox.height + statusBox.height;
   logBox.left = Math.floor(screenWidth * 0.41);
   logBox.width = Math.floor(screenWidth * 0.6);
   logBox.height = screenHeight - (headerBox.height + statusBox.height);
-  
+
   menuBox.top = headerBox.height + statusBox.height + walletBox.height;
   menuBox.width = Math.floor(screenWidth * 0.4);
   menuBox.height = screenHeight - (headerBox.height + statusBox.height + walletBox.height);
-  
+
   if (menuBox.top != null) {
     faucetSubMenu.top = menuBox.top;
     faucetSubMenu.width = menuBox.width;
@@ -1211,7 +1375,7 @@ function adjustLayout() {
     repetitionsForm.width = Math.floor(screenWidth * 0.3);
     repetitionsForm.height = Math.floor(screenHeight * 0.3);
   }
-  
+
   safeRender();
 }
 
@@ -1222,7 +1386,7 @@ function updateStatus() {
     : isCycleRunning
       ? `${loadingSpinner[spinnerIndex]} ${chalk.yellowBright("Waiting for next cycle")}`
       : chalk.green("Idle");
-  const statusText = `Status: ${status} | Active Account: ${getShortAddress(walletInfo.address)} | Total Accounts: ${privateKeys.length} | Swap: ${dailyActivityConfig.swapRepetitions}x | Send: ${dailyActivityConfig.sendPhrsRepetitions}x`;
+  const statusText = `Status: ${status} | Active Account: ${getShortAddress(walletInfo.address)} | Total Accounts: ${privateKeys.length} | Swap: ${dailyActivityConfig.swapRepetitions}x | Send: ${dailyActivityConfig.sendPhrsRepetitions}x | LP: ${dailyActivityConfig.addLiquidityRepetitions}x`;
   try {
     statusBox.setContent(statusText);
   } catch (error) {
@@ -1289,30 +1453,30 @@ menuBox.on("select", async item => {
         await runDailyActivity();
       }
       break;
-      case "Stop Activity":
-          shouldStop = true;
-          if (dailyActivityInterval) {
-            clearTimeout(dailyActivityInterval);
-            dailyActivityInterval = null;
-          }
-          addLog("Stopping daily activity... Please wait for ongoing processes to complete.", "info");
-          const stopCheckInterval = setInterval(() => {
-            if (activeProcesses <= 0) { 
-              clearInterval(stopCheckInterval);
-              activityRunning = false;
-              isCycleRunning = false;
-              shouldStop = false;
-              hasLoggedSleepInterrupt = false;
-              activeProcesses = 0; 
-              addLog(`Daily activity stopped successfully.}`, "success");
-              updateMenu();
-              updateStatus();
-              safeRender();
-            } else {
-              addLog(`Waiting for ${activeProcesses} process to complete...`, "info");
-            }
-          }, 1000);
-          break;
+    case "Stop Activity":
+      shouldStop = true;
+      if (dailyActivityInterval) {
+        clearTimeout(dailyActivityInterval);
+        dailyActivityInterval = null;
+      }
+      addLog("Stopping daily activity... Please wait for ongoing processes to complete.", "info");
+      const stopCheckInterval = setInterval(() => {
+        if (activeProcesses <= 0) {
+          clearInterval(stopCheckInterval);
+          activityRunning = false;
+          isCycleRunning = false;
+          shouldStop = false;
+          hasLoggedSleepInterrupt = false;
+          activeProcesses = 0;
+          addLog(`Daily activity stopped successfully.`, "success");
+          updateMenu();
+          updateStatus();
+          safeRender();
+        } else {
+          addLog(`Waiting for ${activeProcesses} process to complete...`, "info");
+        }
+      }, 1000);
+      break;
     case "Claim Faucet":
       menuBox.hide();
       faucetSubMenu.show();
@@ -1460,6 +1624,17 @@ dailyActivitySubMenu.on("select", item => {
         }
       }, 100);
       break;
+    case "Set LP Config":
+      repetitionsForm.show();
+      repetitionsForm.configType = "addLiquidity";
+      setTimeout(() => {
+        if (repetitionsForm.visible) {
+          screen.focusPush(repetitionsInput);
+          repetitionsInput.setValue(dailyActivityConfig.addLiquidityRepetitions.toString());
+          safeRender();
+        }
+      }, 100);
+      break;
     case "Back to Main Menu":
       dailyActivitySubMenu.hide();
       menuBox.show();
@@ -1528,7 +1703,7 @@ amountForm.on("submit", async () => {
   }
 
   amountForm.hide();
-  addLog(`Starting Auto Swap PHRS to wPHRS with amount: ${amountPHRs} PHRs.`, "info");
+  addLog(`Starting Auto Swap PHRS to wPHRs with amount: ${amountPHRs} PHRs.`, "info");
 
   try {
     if (amountForm.swapAll) {
@@ -1610,6 +1785,9 @@ repetitionsForm.on("submit", () => {
   } else if (repetitionsForm.configType === "sendPhrs") {
     dailyActivityConfig.sendPhrsRepetitions = repetitions;
     addLog(`Send PHRS Config set to ${repetitions}`, "success");
+  } else if (repetitionsForm.configType === "addLiquidity") {
+    dailyActivityConfig.addLiquidityRepetitions = repetitions;
+    addLog(`LP Config set to ${repetitions}`, "success");
   }
   saveConfig();
   updateStatus();
@@ -1659,16 +1837,20 @@ screen.key(["escape", "q", "C-c"], () => {
   process.exit(0);
 });
 
+async function initialize() {
+  loadConfig();
+  loadPrivateKeys();
+  loadProxies();
+  updateStatus();
+  updateWallets();
+  updateLogs();
+  safeRender();
+  menuBox.focus();
+}
+
 setTimeout(() => {
   adjustLayout();
   screen.on("resize", adjustLayout);
 }, 100);
 
-loadConfig();
-loadPrivateKeys();
-loadProxies();
-updateStatus();
-updateWallets();
-updateLogs();
-safeRender();
-menuBox.focus();
+initialize();
